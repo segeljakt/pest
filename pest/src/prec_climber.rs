@@ -27,17 +27,32 @@ pub enum Assoc {
     Right
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Position {
+    /// Prefix unary `Operator`
+    Prefix,
+    /// Suffix unary `Operator`
+    Suffix,
+}
+
+    #[derive(Debug)]
+pub struct UnaryOperator<R: RuleType> {
+    rule: R,
+    pos: Position,
+    next: Option<Box<UnaryOperator<R>>>
+}
+
 /// Infix operator used in [`PrecClimber`].
 ///
 /// [`PrecClimber`]: struct.PrecClimber.html
 #[derive(Debug)]
-pub struct Operator<R: RuleType> {
+pub struct BinaryOperator<R: RuleType> {
     rule: R,
     assoc: Assoc,
-    next: Option<Box<Operator<R>>>
+    next: Option<Box<BinaryOperator<R>>>
 }
 
-impl<R: RuleType> Operator<R> {
+impl<R: RuleType> UnaryOperator<R> {
     /// Creates a new `Operator` from a `Rule` and `Assoc`.
     ///
     /// # Examples
@@ -53,8 +68,33 @@ impl<R: RuleType> Operator<R> {
     /// # }
     /// Operator::new(Rule::plus, Assoc::Left) | Operator::new(Rule::minus, Assoc::Right);
     /// ```
-    pub fn new(rule: R, assoc: Assoc) -> Operator<R> {
-        Operator {
+    pub fn new(rule: R, pos: Position) -> UnaryOperator<R> {
+        UnaryOperator {
+            rule,
+            pos,
+            next: None
+        }
+    }
+}
+
+impl<R: RuleType> BinaryOperator<R> {
+    /// Creates a new `Operator` from a `Rule` and `Assoc`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use pest::prec_climber::{Assoc, Operator};
+    /// # #[allow(non_camel_case_types)]
+    /// # #[allow(dead_code)]
+    /// # #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+    /// # enum Rule {
+    /// #     plus,
+    /// #     minus
+    /// # }
+    /// Operator::new(Rule::plus, Assoc::Left) | Operator::new(Rule::minus, Assoc::Right);
+    /// ```
+    pub fn new(rule: R, assoc: Assoc) -> BinaryOperator<R> {
+        BinaryOperator {
             rule,
             assoc,
             next: None
@@ -62,11 +102,11 @@ impl<R: RuleType> Operator<R> {
     }
 }
 
-impl<R: RuleType> BitOr for Operator<R> {
+impl<R: RuleType> BitOr for BinaryOperator<R> {
     type Output = Self;
 
     fn bitor(mut self, rhs: Self) -> Self {
-        fn assign_next<R: RuleType>(op: &mut Operator<R>, next: Operator<R>) {
+        fn assign_next<R: RuleType>(op: &mut BinaryOperator<R>, next: BinaryOperator<R>) {
             if let Some(ref mut child) = op.next {
                 assign_next(child, next);
             } else {
@@ -87,7 +127,8 @@ impl<R: RuleType> BitOr for Operator<R> {
 /// [`Pairs`]: ../iterators/struct.Pairs.html
 #[derive(Debug)]
 pub struct PrecClimber<R: RuleType> {
-    ops: HashMap<R, (u32, Assoc)>
+    binops: HashMap<R, (u32, Assoc)>,
+    unops: HashMap<R, Position>
 }
 
 impl<R: RuleType> PrecClimber<R> {
@@ -115,101 +156,146 @@ impl<R: RuleType> PrecClimber<R> {
     ///     Operator::new(Rule::power, Assoc::Right)
     /// ]);
     /// ```
-    pub fn new(ops: Vec<Operator<R>>) -> PrecClimber<R> {
-        let ops = ops.into_iter()
-            .zip(1..)
-            .fold(HashMap::new(), |mut map, (op, prec)| {
-                let mut next = Some(op);
+    pub fn new(unops: Vec<UnaryOperator<R>>, binops: Vec<BinaryOperator<R>>) -> PrecClimber<R> {
+        let unops = unops.into_iter()
+            .fold(HashMap::new(), |mut map, unop| {
+                let mut next = Some(unop);
 
-                while let Some(op) = next.take() {
-                    match op {
-                        Operator {
+                while let Some(unop) = next.take() {
+                    match unop {
+                        UnaryOperator {
                             rule,
-                            assoc,
-                            next: op_next
+                            pos,
+                            next: unop_next,
                         } => {
-                            map.insert(rule, (prec, assoc));
-                            next = op_next.map(|op| *op);
+                            map.insert(rule, pos);
+                            next = unop_next.map(|op| *op);
                         }
                     }
                 }
 
                 map
             });
+        let binops = binops.into_iter()
+            .zip(1..)
+            .fold(HashMap::new(), |mut map, (binop, prec)| {
+                let mut next = Some(binop);
 
-        PrecClimber { ops }
+                while let Some(binop) = next.take() {
+                    match binop {
+                        BinaryOperator {
+                            rule,
+                            assoc,
+                            next: binop_next
+                        } => {
+                            map.insert(rule, (prec, assoc));
+                            next = binop_next.map(|op| *op);
+                        }
+                    }
+                }
+
+                map
+            });
+        PrecClimber { unops, binops }
     }
 
-    /// Performs the precedence climbing algorithm on the `pairs` in a similar manner to map-reduce.
-    /// *Primary* pairs are mapped with `primary` and then reduced to one single result with
-    /// `infix`.
-    ///
-    /// # Panics
-    ///
-    /// Panics will occur when `pairs` is empty or when the alternating *primary*, *operator*,
-    /// *primary* order is not respected.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// let primary = |pair| {
-    ///     consume(pair, climber)
-    /// };
-    /// let infix = |lhs: i32, op: Pair<Rule>, rhs: i32| {
-    ///     match op.rule() {
-    ///         Rule::plus => lhs + rhs,
-    ///         Rule::minus => lhs - rhs,
-    ///         Rule::times => lhs * rhs,
-    ///         Rule::divide => lhs / rhs,
-    ///         Rule::power => lhs.pow(rhs as u32),
-    ///         _ => unreachable!()
-    ///     }
-    /// };
-    ///
-    /// let result = climber.climb(pairs, primary, infix);
-    /// ```
-    pub fn climb<'i, P, F, G, T>(&self, mut pairs: P, mut primary: F, mut infix: G) -> T
+    pub fn climb<'i, P, F, G, H, I, T>(
+        &self,
+        pairs: P,
+        primary: F,
+        prefix: G,
+        suffix: H,
+        infix: I
+    ) -> T
     where
         P: Iterator<Item = Pair<'i, R>>,
-        F: FnMut(Pair<'i, R>) -> T,
-        G: FnMut(T, Pair<'i, R>, T) -> T
+        F: Fn(Pair<'i, R>) -> T,
+        G: Fn(Pair<'i, R>, T) -> T,
+        H: Fn(T, Pair<'i, R>) -> T,
+        I: Fn(T, Pair<'i, R>, T) -> T,
     {
-        let lhs = primary(
-            pairs
-                .next()
-                .expect("precedence climbing requires a non-empty Pairs")
-        );
-        self.climb_rec(lhs, 0, &mut pairs.peekable(), &mut primary, &mut infix)
+        let peekable = &mut pairs.peekable();
+        let lhs = self.climb_unary(peekable, &primary, &prefix, &suffix);
+        self.climb_binary(lhs, 0, peekable, &primary, &prefix, &suffix, &infix)
     }
 
-    fn climb_rec<'i, P, F, G, T>(
+
+    fn climb_unary<'i, P, F, G, H, T>(&self, pairs: &mut Peekable<P>, primary: &F, prefix: &G, suffix: &H) -> T
+    where
+        P: Iterator<Item = Pair<'i, R>>,
+        F: Fn(Pair<'i, R>) -> T,
+        G: Fn(Pair<'i, R>, T) -> T,
+        H: Fn(T, Pair<'i, R>) -> T,
+    {
+        let expr = self.climb_prefix(pairs, primary, prefix);
+        let expr = self.climb_suffix(pairs, suffix, expr);
+        expr
+    }
+
+    // Climb the suffix of a unary expression
+    fn climb_suffix<'i, P, F, T>(&self, pairs: &mut Peekable<P>, suffix: &F, mut expr: T) -> T
+    where 
+        P: Iterator<Item = Pair<'i, R>>,
+        F: Fn(T, Pair<'i, R>) -> T,
+    {
+        while pairs.peek().is_some() {
+            let rule = pairs.peek().unwrap().as_rule();
+            if let Some(Position::Suffix) = self.unops.get(&rule) {
+                expr = suffix(expr, pairs.next().unwrap());
+            } else {
+                break;
+            }
+        }
+        expr
+    }
+
+    // Climb the prefix of a unary expression
+    fn climb_prefix<'i, P, F, G, T>(&self, pairs: &mut Peekable<P>, primary: &F, prefix: &G) -> T
+    where
+        P: Iterator<Item = Pair<'i, R>>,
+        F: Fn(Pair<'i, R>) -> T,
+        G: Fn(Pair<'i, R>, T) -> T,
+    {
+        let pair = pairs.next().unwrap();
+        match self.unops.get(&pair.as_rule()) {
+            Some(Position::Prefix) => {
+                let expr = self.climb_prefix(pairs, primary, prefix);
+                prefix(pair, expr)
+            },
+            _ => primary(pair),
+        }
+    }
+
+    // Climb a binary expression
+    fn climb_binary<'i, P, F, G, H, I, T>(
         &self,
         mut lhs: T,
         min_prec: u32,
         pairs: &mut Peekable<P>,
-        primary: &mut F,
-        infix: &mut G
+        primary: &F,
+        prefix: &G,
+        suffix: &H,
+        infix: &I
     ) -> T
     where
         P: Iterator<Item = Pair<'i, R>>,
-        F: FnMut(Pair<'i, R>) -> T,
-        G: FnMut(T, Pair<'i, R>, T) -> T
+        F: Fn(Pair<'i, R>) -> T,
+        G: Fn(Pair<'i, R>, T) -> T,
+        H: Fn(T, Pair<'i, R>) -> T,
+        I: Fn(T, Pair<'i, R>, T) -> T,
     {
         while pairs.peek().is_some() {
             let rule = pairs.peek().unwrap().as_rule();
-            if let Some(&(prec, _)) = self.ops.get(&rule) {
+            if let Some(&(prec, _)) = self.binops.get(&rule) {
                 if prec >= min_prec {
                     let op = pairs.next().unwrap();
-                    let mut rhs = primary(pairs.next().expect(
-                        "infix operator must be followed by \
-                         a primary expression"
-                    ));
+                    let mut rhs = self.climb_unary(pairs, primary, prefix, suffix);
 
                     while pairs.peek().is_some() {
                         let rule = pairs.peek().unwrap().as_rule();
-                        if let Some(&(new_prec, assoc)) = self.ops.get(&rule) {
+                        if let Some(&(new_prec, assoc)) = self.binops.get(&rule) {
                             if new_prec > prec || assoc == Assoc::Right && new_prec == prec {
-                                rhs = self.climb_rec(rhs, new_prec, pairs, primary, infix);
+                                rhs = self.climb_binary(rhs, new_prec, pairs, primary, prefix, suffix, infix);
                             } else {
                                 break;
                             }
