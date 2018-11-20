@@ -119,6 +119,82 @@ impl<R: RuleType> BitOr for BinaryOperator<R> {
     }
 }
 
+pub struct PrecClimberBuilder<R: RuleType> {
+    unops: Option<Vec<UnaryOperator<R>>>,
+    binops: Option<Vec<BinaryOperator<R>>>,
+}
+
+impl<R: RuleType> PrecClimberBuilder<R> {
+  pub fn new() -> PrecClimberBuilder<R> {
+    Self {
+      unops: None,
+      binops: None,
+    }
+  }
+}
+
+impl<R: RuleType> PrecClimberBuilder<R> {
+
+    pub fn with_unary_operators(self, unops: Vec<UnaryOperator<R>>) -> Self {
+      Self {
+        unops: Some(unops),
+        binops: self.binops,
+      }
+    }
+
+    pub fn with_binary_operators(self, binops: Vec<BinaryOperator<R>>) -> Self {
+      Self {
+        unops: self.unops,
+        binops: Some(binops),
+      }
+    }
+
+    pub fn build(self) -> PrecClimber<R> {
+      let unops = self.unops.unwrap_or(vec![]).into_iter()
+        .fold(HashMap::new(), |mut map, unop| {
+          let mut next = Some(unop);
+
+          while let Some(unop) = next.take() {
+            match unop {
+              UnaryOperator {
+                rule,
+                pos,
+                next: unop_next,
+              } => {
+                map.insert(rule, pos);
+                next = unop_next.map(|op| *op);
+              }
+            }
+          }
+
+          map
+        });
+      let binops = self.binops.unwrap_or(vec![]).into_iter()
+        .zip(1..)
+        .fold(HashMap::new(), |mut map, (binop, prec)| {
+          let mut next = Some(binop);
+
+          while let Some(binop) = next.take() {
+            match binop {
+              BinaryOperator {
+                rule,
+                assoc,
+                next: binop_next
+              } => {
+                map.insert(rule, (prec, assoc));
+                next = binop_next.map(|op| *op);
+              }
+            }
+          }
+
+          map
+        });
+      PrecClimber { unops, binops }
+    }
+}
+
+
+
 /// List of operators and precedences, which can perform [precedence climbing][1] on infix
 /// expressions contained in a [`Pairs`]. The token pairs contained in the `Pairs` should start
 /// with a *primary* pair and then alternate between an *operator* and a *primary*.
@@ -156,48 +232,6 @@ impl<R: RuleType> PrecClimber<R> {
     ///     Operator::new(Rule::power, Assoc::Right)
     /// ]);
     /// ```
-    pub fn new(unops: Vec<UnaryOperator<R>>, binops: Vec<BinaryOperator<R>>) -> PrecClimber<R> {
-        let unops = unops.into_iter()
-            .fold(HashMap::new(), |mut map, unop| {
-                let mut next = Some(unop);
-
-                while let Some(unop) = next.take() {
-                    match unop {
-                        UnaryOperator {
-                            rule,
-                            pos,
-                            next: unop_next,
-                        } => {
-                            map.insert(rule, pos);
-                            next = unop_next.map(|op| *op);
-                        }
-                    }
-                }
-
-                map
-            });
-        let binops = binops.into_iter()
-            .zip(1..)
-            .fold(HashMap::new(), |mut map, (binop, prec)| {
-                let mut next = Some(binop);
-
-                while let Some(binop) = next.take() {
-                    match binop {
-                        BinaryOperator {
-                            rule,
-                            assoc,
-                            next: binop_next
-                        } => {
-                            map.insert(rule, (prec, assoc));
-                            next = binop_next.map(|op| *op);
-                        }
-                    }
-                }
-
-                map
-            });
-        PrecClimber { unops, binops }
-    }
 
     pub fn climb<'i, P, F, G, H, I, T>(
         &self,
