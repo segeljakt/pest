@@ -15,6 +15,7 @@ use std::ops::BitOr;
 
 use RuleType;
 use iterators::Pair;
+use std::marker::PhantomData;
 
 /// Associativity of an [`Operator`].
 ///
@@ -27,173 +28,64 @@ pub enum Assoc {
     Right
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Position {
-    /// Prefix unary `Operator`
-    Prefix,
-    /// Suffix unary `Operator`
-    Suffix,
+type Prec = u32;
+type OpNeighbor<R> = Option<Box<Op<R>>>;
+
+pub struct Op<R: RuleType> {
+  rule: R,
+  kind: OpKind,
+  next: OpNeighbor<R>
 }
 
-    #[derive(Debug)]
-pub struct UnaryOperator<R: RuleType> {
-    rule: R,
-    pos: Position,
-    next: Option<Box<UnaryOperator<R>>>
+pub enum OpKind {
+  Prefix,
+  Suffix,
+  Infix(Assoc)
 }
 
-/// Infix operator used in [`PrecClimber`].
-///
-/// [`PrecClimber`]: struct.PrecClimber.html
-#[derive(Debug)]
-pub struct BinaryOperator<R: RuleType> {
-    rule: R,
-    assoc: Assoc,
-    next: Option<Box<BinaryOperator<R>>>
-}
+impl<R: RuleType> Op<R> {
 
-impl<R: RuleType> UnaryOperator<R> {
-    /// Creates a new `Operator` from a `Rule` and `Assoc`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use pest::prec_climber::{Assoc, Operator};
-    /// # #[allow(non_camel_case_types)]
-    /// # #[allow(dead_code)]
-    /// # #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-    /// # enum Rule {
-    /// #     plus,
-    /// #     minus
-    /// # }
-    /// Operator::new(Rule::plus, Assoc::Left) | Operator::new(Rule::minus, Assoc::Right);
-    /// ```
-    pub fn new(rule: R, pos: Position) -> UnaryOperator<R> {
-        UnaryOperator {
-            rule,
-            pos,
-            next: None
-        }
+  pub fn prefix(rule: R) -> Op<R> {
+    Op {
+      rule: rule,
+      kind: OpKind::Prefix,
+      next: None
     }
-}
+  }
 
-impl<R: RuleType> BinaryOperator<R> {
-    /// Creates a new `Operator` from a `Rule` and `Assoc`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use pest::prec_climber::{Assoc, Operator};
-    /// # #[allow(non_camel_case_types)]
-    /// # #[allow(dead_code)]
-    /// # #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-    /// # enum Rule {
-    /// #     plus,
-    /// #     minus
-    /// # }
-    /// Operator::new(Rule::plus, Assoc::Left) | Operator::new(Rule::minus, Assoc::Right);
-    /// ```
-    pub fn new(rule: R, assoc: Assoc) -> BinaryOperator<R> {
-        BinaryOperator {
-            rule,
-            assoc,
-            next: None
-        }
+  pub fn suffix(rule: R) -> Op<R> {
+    Op {
+      rule: rule,
+      kind: OpKind::Suffix,
+      next: None
     }
-}
+  }
 
-impl<R: RuleType> BitOr for BinaryOperator<R> {
-    type Output = Self;
-
-    fn bitor(mut self, rhs: Self) -> Self {
-        fn assign_next<R: RuleType>(op: &mut BinaryOperator<R>, next: BinaryOperator<R>) {
-            if let Some(ref mut child) = op.next {
-                assign_next(child, next);
-            } else {
-                op.next = Some(Box::new(next));
-            }
-        }
-
-        assign_next(&mut self, rhs);
-        self
-    }
-}
-
-pub struct PrecClimberBuilder<R: RuleType> {
-    unops: Option<Vec<UnaryOperator<R>>>,
-    binops: Option<Vec<BinaryOperator<R>>>,
-}
-
-impl<R: RuleType> PrecClimberBuilder<R> {
-  pub fn new() -> PrecClimberBuilder<R> {
-    Self {
-      unops: None,
-      binops: None,
+  pub fn infix(rule: R, assoc: Assoc) -> Op<R> {
+    Op {
+      rule: rule,
+      kind: OpKind::Infix(assoc),
+      next: None
     }
   }
 }
 
-impl<R: RuleType> PrecClimberBuilder<R> {
+impl<R: RuleType> BitOr for Op<R> {
+  type Output = Self;
 
-    pub fn with_unary_operators(self, unops: Vec<UnaryOperator<R>>) -> Self {
-      Self {
-        unops: Some(unops),
-        binops: self.binops,
+  fn bitor(mut self, rhs: Self) -> Self {
+    fn assign_next<R: RuleType>(op: &mut Op<R>, next: Op<R>) {
+      if let Some(ref mut child) = op.next {
+        assign_next(child, next);
+      } else {
+        op.next = Some(Box::new(next));
       }
     }
 
-    pub fn with_binary_operators(self, binops: Vec<BinaryOperator<R>>) -> Self {
-      Self {
-        unops: self.unops,
-        binops: Some(binops),
-      }
-    }
-
-    pub fn build(self) -> PrecClimber<R> {
-      let unops = self.unops.unwrap_or(vec![]).into_iter()
-        .fold(HashMap::new(), |mut map, unop| {
-          let mut next = Some(unop);
-
-          while let Some(unop) = next.take() {
-            match unop {
-              UnaryOperator {
-                rule,
-                pos,
-                next: unop_next,
-              } => {
-                map.insert(rule, pos);
-                next = unop_next.map(|op| *op);
-              }
-            }
-          }
-
-          map
-        });
-      let binops = self.binops.unwrap_or(vec![]).into_iter()
-        .zip(1..)
-        .fold(HashMap::new(), |mut map, (binop, prec)| {
-          let mut next = Some(binop);
-
-          while let Some(binop) = next.take() {
-            match binop {
-              BinaryOperator {
-                rule,
-                assoc,
-                next: binop_next
-              } => {
-                map.insert(rule, (prec, assoc));
-                next = binop_next.map(|op| *op);
-              }
-            }
-          }
-
-          map
-        });
-      PrecClimber { unops, binops }
-    }
+    assign_next(&mut self, rhs);
+    self
+  }
 }
-
-
 
 /// List of operators and precedences, which can perform [precedence climbing][1] on infix
 /// expressions contained in a [`Pairs`]. The token pairs contained in the `Pairs` should start
@@ -201,10 +93,22 @@ impl<R: RuleType> PrecClimberBuilder<R> {
 ///
 /// [1]: https://en.wikipedia.org/wiki/Operator-precedence_parser#Precedence_climbing_method
 /// [`Pairs`]: ../iterators/struct.Pairs.html
-#[derive(Debug)]
 pub struct PrecClimber<R: RuleType> {
-    binops: HashMap<R, (u32, Assoc)>,
-    unops: HashMap<R, Position>
+    prec: Prec,
+    ops: HashMap<R, (OpKind, Prec)>
+}
+
+pub struct PrecClimberMap<R: 'static, F, T> 
+where
+    R: RuleType,
+    for<'i> F: Fn(Pair<'i, R>) -> T,
+{
+  ops: &'static HashMap<R, (OpKind, Prec)>,
+  primary: F,
+  prefix: Option<Box<Fn(Pair<R>, T) -> T>>,
+  suffix: Option<Box<Fn(T, Pair<R>) -> T>>,
+  infix: Option<Box<Fn(T, Pair<R>, T) -> T>>,
+  phantom: PhantomData<T>,
 }
 
 impl<R: RuleType> PrecClimber<R> {
@@ -233,120 +137,194 @@ impl<R: RuleType> PrecClimber<R> {
     /// ]);
     /// ```
 
-    pub fn climb<'i, P, F, G, H, I, T>(
-        &self,
-        pairs: P,
-        primary: F,
-        prefix: G,
-        suffix: H,
-        infix: I
-    ) -> T
-    where
-        P: Iterator<Item = Pair<'i, R>>,
-        F: Fn(Pair<'i, R>) -> T,
-        G: Fn(Pair<'i, R>, T) -> T,
-        H: Fn(T, Pair<'i, R>) -> T,
-        I: Fn(T, Pair<'i, R>, T) -> T,
-    {
-        let peekable = &mut pairs.peekable();
-        let lhs = self.climb_unary(peekable, &primary, &prefix, &suffix);
-        self.climb_binary(lhs, 0, peekable, &primary, &prefix, &suffix, &infix)
+  pub fn new() -> Self {
+    Self {
+      prec: 1,
+      ops: HashMap::new(),
     }
+  }
 
-
-    fn climb_unary<'i, P, F, G, H, T>(&self, pairs: &mut Peekable<P>, primary: &F, prefix: &G, suffix: &H) -> T
-    where
-        P: Iterator<Item = Pair<'i, R>>,
-        F: Fn(Pair<'i, R>) -> T,
-        G: Fn(Pair<'i, R>, T) -> T,
-        H: Fn(T, Pair<'i, R>) -> T,
-    {
-        let expr = self.climb_prefix(pairs, primary, prefix);
-        let expr = self.climb_suffix(pairs, suffix, expr);
-        expr
+  pub fn op<T>(mut self, op: Op<R>) -> Self {
+    self.prec += 1;
+    let mut iter = Some(op);
+    while let Some( Op { rule, kind, next } ) = iter.take() {
+      self.ops.insert(rule, (kind, self.prec));
+      iter = next.map(|op| *op);
     }
+    self
+  }
 
-    // Climb the suffix of a unary expression
-    fn climb_suffix<'i, P, F, T>(&self, pairs: &mut Peekable<P>, suffix: &F, mut expr: T) -> T
-    where 
-        P: Iterator<Item = Pair<'i, R>>,
-        F: Fn(T, Pair<'i, R>) -> T,
-    {
-        while pairs.peek().is_some() {
-            let rule = pairs.peek().unwrap().as_rule();
-            if let Some(Position::Suffix) = self.unops.get(&rule) {
-                expr = suffix(expr, pairs.next().unwrap());
-            } else {
-                break;
-            }
-        }
-        expr
+
+
+  pub fn map_primary<F, T>(&'static self, primary: F) -> PrecClimberMap<R, F, T>
+  where
+    R: RuleType,
+    for<'i> F: Fn(Pair<'i, R>) -> T,
+  {
+    PrecClimberMap {
+      ops: &self.ops,
+      primary: primary,
+      prefix: None::<Box<Fn(Pair<R>, T) -> T>>,
+      suffix: None::<Box<Fn(T, Pair<R>) -> T>>,
+      infix: None::<Box<Fn(T, Pair<R>, T) -> T>>,
+      phantom: PhantomData
     }
+  }
 
-    // Climb the prefix of a unary expression
-    fn climb_prefix<'i, P, F, G, T>(&self, pairs: &mut Peekable<P>, primary: &F, prefix: &G) -> T
-    where
-        P: Iterator<Item = Pair<'i, R>>,
-        F: Fn(Pair<'i, R>) -> T,
-        G: Fn(Pair<'i, R>, T) -> T,
-    {
-        let pair = pairs.next().unwrap();
-        match self.unops.get(&pair.as_rule()) {
-            Some(Position::Prefix) => {
-                let expr = self.climb_prefix(pairs, primary, prefix);
-                prefix(pair, expr)
-            },
-            _ => primary(pair),
-        }
+}
+
+impl<R, F, T> PrecClimberMap<R, F, T> 
+where
+    R: RuleType,
+    for<'i> F: Fn(Pair<'i, R>) -> T,
+{
+  pub fn map_prefix<X>(self, prefix: X) -> PrecClimberMap<R, F, T>
+  where
+    for<'i> X: Fn(Pair<'i, R>, T) -> T,
+  {
+    PrecClimberMap {
+      ops: self.ops,
+      primary: self.primary,
+      prefix: Some(Box::new(prefix)),
+      suffix: self.suffix,
+      infix: self.infix,
+      phantom: PhantomData
     }
+  }
 
-    // Climb a binary expression
-    fn climb_binary<'i, P, F, G, H, I, T>(
-        &self,
-        mut lhs: T,
-        min_prec: u32,
-        pairs: &mut Peekable<P>,
-        primary: &F,
-        prefix: &G,
-        suffix: &H,
-        infix: &I
-    ) -> T
-    where
-        P: Iterator<Item = Pair<'i, R>>,
-        F: Fn(Pair<'i, R>) -> T,
-        G: Fn(Pair<'i, R>, T) -> T,
-        H: Fn(T, Pair<'i, R>) -> T,
-        I: Fn(T, Pair<'i, R>, T) -> T,
-    {
-        while pairs.peek().is_some() {
-            let rule = pairs.peek().unwrap().as_rule();
-            if let Some(&(prec, _)) = self.binops.get(&rule) {
-                if prec >= min_prec {
-                    let op = pairs.next().unwrap();
-                    let mut rhs = self.climb_unary(pairs, primary, prefix, suffix);
+  pub fn map_suffix<X>(self, suffix: X) -> PrecClimberMap<R, F, T>
+  where
+    for<'i> X: Fn(T, Pair<'i, R>) -> T,
+  {
+    PrecClimberMap {
+      ops: self.ops,
+      primary: self.primary,
+      prefix: self.prefix,
+      suffix: Some(Box::new(suffix)),
+      infix: self.infix,
+      phantom: PhantomData
+    }
+  }
 
-                    while pairs.peek().is_some() {
-                        let rule = pairs.peek().unwrap().as_rule();
-                        if let Some(&(new_prec, assoc)) = self.binops.get(&rule) {
-                            if new_prec > prec || assoc == Assoc::Right && new_prec == prec {
-                                rhs = self.climb_binary(rhs, new_prec, pairs, primary, prefix, suffix, infix);
-                            } else {
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    }
+  pub fn map_infix<X>(self, infix: X) -> PrecClimberMap<R, F, T>
+  where
+    for<'i> X: Fn(T, Pair<'i, R>, T) -> T,
+  {
+    PrecClimberMap {
+      ops: self.ops,
+      primary: self.primary,
+      prefix: self.prefix,
+      suffix: self.suffix,
+      infix: Some(Box::new(infix)),
+      phantom: PhantomData
+    }
+  }
 
-                    lhs = infix(lhs, op, rhs);
-                } else {
-                    break;
-                }
-            } else {
-                break;
-            }
-        }
-
+  pub fn climb<'i,P>(&self, pairs: P) -> T
+  where
+      P: Iterator<Item = Pair<'i, R>>,
+  {
+      let peekable = &mut pairs.peekable();
+      let lhs = self.climb_unary(peekable);
+      let expr = if let Some(ref infix) = self.infix {
+        self.climb_binary(lhs, 0, peekable, infix)
+      } else {
         lhs
-    }
+      };
+      expr
+  }
+
+
+  fn climb_unary<'i,P>(&self, pairs: &mut Peekable<P>) -> T
+  where
+      P: Iterator<Item = Pair<'i, R>>,
+  {
+    let expr = if let Some(ref prefix) = self.prefix {
+      self.climb_prefix(pairs, prefix)
+    } else {
+      (self.primary)(pairs.next().unwrap())
+    };
+    let expr = if let Some(ref suffix) = self.suffix {
+      self.climb_suffix(pairs, expr, suffix)
+    } else {
+      expr
+    };
+    expr
+  }
+
+  // Climb the prefix of a unary expression
+  fn climb_prefix<'i,P,X>(&self, pairs: &mut Peekable<P>, prefix: &Box<X>) -> T
+  where
+      P: Iterator<Item = Pair<'i, R>>,
+      X: Fn(T, Pair<'i, R>) -> T,
+  {
+      let pair = pairs.next().unwrap();
+      if let Some((OpKind::Prefix, _)) = self.ops.get(&pair.as_rule()) {
+        let expr = self.climb_prefix(pairs, prefix);
+        prefix(pair, expr)
+      } else {
+        (self.primary)(pair)
+      }
+  }
+
+  // Climb the suffix of a unary expression
+  fn climb_suffix<'i,P,X>(&self, pairs: &mut Peekable<P>, mut expr: T, suffix: &Box<X>) -> T
+  where 
+      P: Iterator<Item = Pair<'i, R>>,
+      X: Fn(Pair<'i, R>, T) -> T,
+  {
+      while pairs.peek().is_some() {
+          let rule = pairs.peek().unwrap().as_rule();
+          if let Some((OpKind::Suffix, _)) = self.ops.get(&rule) {
+              expr = suffix(expr, pairs.next().unwrap());
+          } else {
+              break;
+          }
+      }
+      expr
+  }
+
+  // Climb a binary expression
+  fn climb_binary<'i,P,X>(
+      &self,
+      mut lhs: T,
+      min_prec: u32,
+      pairs: &mut Peekable<P>,
+      infix: &Box<X>,
+  ) -> T
+  where
+      P: Iterator<Item = Pair<'i, R>>,
+      X: Fn(T, Pair<'i, R>, T) -> T,
+  {
+      while pairs.peek().is_some() {
+          let rule = pairs.peek().unwrap().as_rule();
+          if let Some(&(OpKind::Infix(_), prec)) = self.ops.get(&rule) {
+              if prec >= min_prec {
+                  let op = pairs.next().unwrap();
+                  let mut rhs = self.climb_unary(pairs);
+
+                  while pairs.peek().is_some() {
+                      let rule = pairs.peek().unwrap().as_rule();
+                      if let Some(&(OpKind::Infix(assoc), new_prec)) = self.ops.get(&rule) {
+                          if new_prec > prec || assoc == Assoc::Right && new_prec == prec {
+                              rhs = self.climb_binary(rhs, new_prec, pairs, infix);
+                          } else {
+                              break;
+                          }
+                      } else {
+                          break;
+                      }
+                  }
+
+                  lhs = infix(lhs, op, rhs);
+              } else {
+                  break;
+              }
+          } else {
+              break;
+          }
+      }
+
+      lhs
+  }
 }
