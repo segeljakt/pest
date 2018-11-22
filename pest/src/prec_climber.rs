@@ -98,16 +98,19 @@ pub struct PrecClimber<R: RuleType> {
     ops: HashMap<R, (OpKind, Prec)>
 }
 
-pub struct PrecClimberMap<R: 'static, F, T> 
+pub struct PrecClimberMap<R: 'static, F, G, H, I, T> 
 where
     R: RuleType,
     for<'i> F: Fn(Pair<'i, R>) -> T,
+    for<'i> G: Fn(Pair<'i, R>, T) -> T,
+    for<'i> H: Fn(T, Pair<'i, R>) -> T,
+    for<'i> I: Fn(T, Pair<'i, R>, T) -> T
 {
   ops: &'static HashMap<R, (OpKind, Prec)>,
   primary: F,
-  prefix: Option<Box<Fn(Pair<R>, T) -> T>>,
-  suffix: Option<Box<Fn(T, Pair<R>) -> T>>,
-  infix: Option<Box<Fn(T, Pair<R>, T) -> T>>,
+  prefix: Option<G>,
+  suffix: Option<H>,
+  infix: Option<I>,
   phantom: PhantomData<T>,
 }
 
@@ -154,45 +157,52 @@ impl<R: RuleType> PrecClimber<R> {
     self
   }
 
-
-
-  pub fn map_primary<F, T>(&'static self, primary: F) -> PrecClimberMap<R, F, T>
+  pub fn map_primary<F, G, H, I, T>(&'static self, primary: F)
+    -> PrecClimberMap<R, F, G, H, I, T>
   where
     R: RuleType,
     for<'i> F: Fn(Pair<'i, R>) -> T,
+    for<'i> G: Fn(Pair<'i, R>, T) -> T,
+    for<'i> H: Fn(T, Pair<'i, R>) -> T,
+    for<'i> I: Fn(T, Pair<'i, R>, T) -> T,
   {
     PrecClimberMap {
       ops: &self.ops,
       primary: primary,
-      prefix: None::<Box<Fn(Pair<R>, T) -> T>>,
-      suffix: None::<Box<Fn(T, Pair<R>) -> T>>,
-      infix: None::<Box<Fn(T, Pair<R>, T) -> T>>,
+      prefix: None,
+      suffix: None,
+      infix: None,
       phantom: PhantomData
     }
   }
 
 }
 
-impl<R, F, T> PrecClimberMap<R, F, T> 
+impl<R, F, G, H, I, T> PrecClimberMap<R, F, G, H, I, T> 
 where
     R: RuleType,
     for<'i> F: Fn(Pair<'i, R>) -> T,
+    for<'i> G: Fn(Pair<'i, R>, T) -> T,
+    for<'i> H: Fn(T, Pair<'i, R>) -> T,
+    for<'i> I: Fn(T, Pair<'i, R>, T) -> T,
 {
-  pub fn map_prefix<X>(self, prefix: X) -> PrecClimberMap<R, F, T>
+  pub fn map_prefix<X>(self, prefix: X)
+    -> PrecClimberMap<R, F, X, H, I, T>
   where
     for<'i> X: Fn(Pair<'i, R>, T) -> T,
   {
     PrecClimberMap {
       ops: self.ops,
       primary: self.primary,
-      prefix: Some(Box::new(prefix)),
+      prefix: Some(prefix),
       suffix: self.suffix,
       infix: self.infix,
       phantom: PhantomData
     }
   }
 
-  pub fn map_suffix<X>(self, suffix: X) -> PrecClimberMap<R, F, T>
+  pub fn map_suffix<X>(self, suffix: X)
+    -> PrecClimberMap<R, F, G, X, I, T>
   where
     for<'i> X: Fn(T, Pair<'i, R>) -> T,
   {
@@ -200,13 +210,14 @@ where
       ops: self.ops,
       primary: self.primary,
       prefix: self.prefix,
-      suffix: Some(Box::new(suffix)),
+      suffix: Some(suffix),
       infix: self.infix,
       phantom: PhantomData
     }
   }
 
-  pub fn map_infix<X>(self, infix: X) -> PrecClimberMap<R, F, T>
+  pub fn map_infix<X>(self, infix: X)
+    -> PrecClimberMap<R, F, G, H, X, T>
   where
     for<'i> X: Fn(T, Pair<'i, R>, T) -> T,
   {
@@ -215,7 +226,7 @@ where
       primary: self.primary,
       prefix: self.prefix,
       suffix: self.suffix,
-      infix: Some(Box::new(infix)),
+      infix: Some(infix),
       phantom: PhantomData
     }
   }
@@ -253,10 +264,9 @@ where
   }
 
   // Climb the prefix of a unary expression
-  fn climb_prefix<'i,P,X>(&self, pairs: &mut Peekable<P>, prefix: &Box<X>) -> T
+  fn climb_prefix<'i,P>(&self, pairs: &mut Peekable<P>, prefix: &G) -> T
   where
       P: Iterator<Item = Pair<'i, R>>,
-      X: Fn(T, Pair<'i, R>) -> T,
   {
       let pair = pairs.next().unwrap();
       if let Some((OpKind::Prefix, _)) = self.ops.get(&pair.as_rule()) {
@@ -268,10 +278,9 @@ where
   }
 
   // Climb the suffix of a unary expression
-  fn climb_suffix<'i,P,X>(&self, pairs: &mut Peekable<P>, mut expr: T, suffix: &Box<X>) -> T
+  fn climb_suffix<'i,P>(&self, pairs: &mut Peekable<P>, mut expr: T, suffix: &H) -> T
   where 
       P: Iterator<Item = Pair<'i, R>>,
-      X: Fn(Pair<'i, R>, T) -> T,
   {
       while pairs.peek().is_some() {
           let rule = pairs.peek().unwrap().as_rule();
@@ -285,16 +294,15 @@ where
   }
 
   // Climb a binary expression
-  fn climb_binary<'i,P,X>(
+  fn climb_binary<'i,P>(
       &self,
       mut lhs: T,
       min_prec: u32,
       pairs: &mut Peekable<P>,
-      infix: &Box<X>,
+      infix: &I,
   ) -> T
   where
       P: Iterator<Item = Pair<'i, R>>,
-      X: Fn(T, Pair<'i, R>, T) -> T,
   {
       while pairs.peek().is_some() {
           let rule = pairs.peek().unwrap().as_rule();
